@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.Python
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+
+# Virtualenv
+.venv/
+venv/
+
+# Env files
+.env
+.env.*
+
+# Logs
+uvicorn.err.log
+uvicorn.out.log
+*.log
+
+# Local data
+app.db
+
+# Editors
+.vscode/
+.idea/

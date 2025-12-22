@@ -1,0 +1,10 @@
+fastapi==0.115.4
+uvicorn[standard]==0.30.6
+pydantic-settings==2.5.2
+chromadb==0.5.5
+# align with latest LangGraph/Studio tooling
+langgraph==1.0.5
+langchain-core==1.2.1
+langsmith==0.4.59
+python-dotenv==1.0.1
+httpx==0.28.1

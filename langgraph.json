@@ -1,0 +1,10 @@
+{
+  "dependencies": [
+    "langgraph==1.0.5",
+    "langchain-core==1.2.1",
+    "langsmith==0.4.59"
+  ],
+  "graphs": {
+    "demo": "app/workflows/langgraph_demo.py:workflow"
+  }
+}
