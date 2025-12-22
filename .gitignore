@@ -24,6 +24,7 @@ uvicorn.out.log
 
 # Local data
 app.db
+.langgraph_api/
 
 # Editors
 .vscode/
