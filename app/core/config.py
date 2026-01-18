@@ -1,3 +1,4 @@
+# ??????????????????
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings
@@ -8,11 +9,6 @@ class Settings(BaseSettings):
     debug: bool = False
     host: str = "0.0.0.0"
     port: int = 8000
-    chroma_host: str = "localhost"
-    chroma_port: int = 8000
-    chroma_collection: str = "demo_collection"
-    chroma_persist_path: str = ".langgraph_api/chroma"
-    chroma_use_http: bool = False
     db_path: str = "app.db"
     modelscope_api_base: str = "https://api-inference.modelscope.cn/v1"
     modelscope_api_key: str = ""
@@ -29,6 +25,12 @@ class Settings(BaseSettings):
     ragflow_api_key: str = ""
     ragflow_top_k_default: int = 4
     ragflow_kb_id: str | None = None
+    # 可选：RAGFlow /v1/retrieval 的 dataset_ids（逗号分隔）
+    ragflow_dataset_ids: str = ""
+    # 可选：RAGFlow rerank_id
+    ragflow_rerank_id: str | None = None
+    school_api_base: str = ""
+    school_api_timeout: float = 30.0
 
     class Config:
         env_file = ".env"

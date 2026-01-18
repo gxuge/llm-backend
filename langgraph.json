@@ -5,6 +5,8 @@
     "langsmith==0.4.59"
   ],
   "graphs": {
-    "demo": "app/workflows/langgraph_demo.py:workflow"
+    "demo": "app/workflows/langgraph_demo.py:workflow",
+    "sz_exam_agent": "app/graphs/exam_agent_graph.py:get_exam_agent_graph",
+    "sz_exam_agent_src": "src/exam_agent/graphs/main_graph.py:get_exam_agent_graph"
   }
 }

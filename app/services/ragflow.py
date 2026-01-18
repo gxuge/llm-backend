@@ -1,3 +1,4 @@
+# ??????????????????
 import json
 import logging
 from functools import lru_cache
@@ -20,7 +21,7 @@ class RagflowRetrievalError(Exception):
 
 class RagflowClient:
     """
-    Minimal async client for querying a RAGFlow knowledge base.
+    最小化 RAGFlow 客户端，用于检索知识库内容。
     """
 
     RETRIEVAL_PATH = "/v1/knowledge_base/retrieval"
@@ -38,6 +39,7 @@ class RagflowClient:
         self.kb_id = kb_id
         self.top_k_default = top_k_default
 
+    # 尝试从多种字段中提取可用上下文
     def _extract_contexts(self, payload: dict[str, Any]) -> list[str]:
         candidates = (
             payload.get("data")
@@ -62,6 +64,7 @@ class RagflowClient:
                     contexts.append(text)
         return contexts
 
+    # 发起检索请求并返回纯文本上下文列表
     async def retrieve(self, query: str, *, top_k: int | None = None) -> list[str]:
         url = f"{self.base_url}{self.RETRIEVAL_PATH}"
         headers = {"Content-Type": "application/json"}

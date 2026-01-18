@@ -1,0 +1,1 @@
+"""Tool table schema definitions."""

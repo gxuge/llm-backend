@@ -1,3 +1,4 @@
+# ??????????????????
 import json
 import logging
 from typing import Any
@@ -26,8 +27,7 @@ async def create_chat_completion(
     stream: bool = False,
 ) -> dict[str, Any]:
     """
-    Proxy a chat completion request to the ModelScope API.
-    Returns a dict with `content`, optional `reasoning`, `model`, and the raw payload.
+    统一的非流式对话接口：返回 content/reasoning/model/raw。
     """
     url = f"{settings.modelscope_api_base.rstrip('/')}/chat/completions"
     auth_key = api_key or settings.modelscope_api_key
@@ -90,8 +90,7 @@ async def stream_chat_completion(
     stream: bool = True,
 ):
     """
-    Stream a chat completion request to the ModelScope API.
-    Returns an async generator that yields raw bytes from the upstream response.
+    流式对话接口：返回上游 SSE 字节流。
     """
     url = f"{settings.modelscope_api_base.rstrip('/')}/chat/completions"
     auth_key = api_key or settings.modelscope_api_key
@@ -112,6 +111,7 @@ async def stream_chat_completion(
         if value is not None:
             payload[key] = value
 
+    # 统一包装错误事件，保持前端 SSE 协议一致
     def _error_event(message: str, status_code: int | None = None) -> bytes:
         data: dict[str, Any] = {"error": message}
         if status_code is not None:
