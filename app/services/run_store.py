@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
+
+from redis.asyncio import Redis
+
+from app.core.config import settings
+from app.core.redis import get_redis
 
 
 @dataclass
 class RunRecord:
-    """单次运行的内存态记录。"""
+    """单次运行的状态快照，存储在内存并持久化到 Redis。"""
 
     status: str
     started_at: int
@@ -18,7 +24,7 @@ class RunRecord:
     finished_at: int | None = None
     result: dict[str, Any] = field(default_factory=dict)
     module_summary: dict[str, Any] = field(default_factory=dict)
-    subscribers: list[asyncio.Queue[str]] = field(default_factory=list)
+    subscribers: list = field(default_factory=list)  # 兼容旧字段，占位
     seq_counter: int = 0
     error: dict[str, Any] | None = None
     rag_summary_text: str = ""
@@ -34,82 +40,126 @@ class RunRecord:
     tools_started: bool = False
     tools_ended: bool = False
 
+    @staticmethod
+    def from_dict(data: dict[str, Any]) -> "RunRecord":
+        # 填充缺省字段，保证字段齐全
+        base = RunRecord(
+            status=data.get("status", "RUNNING"),
+            started_at=data.get("started_at", int(time.time() * 1000)),
+            trace_id=data.get("trace_id", uuid.uuid4().hex),
+        )
+        merged = asdict(base)
+        merged.update(data)
+        if not merged.get("module_summary"):
+            merged["module_summary"] = _init_module_summary()
+        return RunRecord(**merged)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
 
 class RunStore:
-    """最小内存版 RunStore，后续可替换为 Redis/DB。"""
+    """基于 Redis 的 RunStore，事件默认保存 30 分钟（可配置）。"""
 
     def __init__(self) -> None:
-        self._runs: dict[str, RunRecord] = {}
-        self._idempotency: dict[str, str] = {}
-        self._lock = asyncio.Lock()
+        self.redis: Redis = get_redis()
+        self.ttl_seconds = settings.redis_ttl_minutes * 60
+        self._subscriber_tasks: dict[asyncio.Queue[str], asyncio.Task] = {}
 
-    # 创建 run（支持 userId+clientId 幂等）
+    def _key_record(self, run_id: str) -> str:
+        return f"run:{run_id}:record"
+
+    def _key_idempotency(self, user_id: str, client_id: str) -> str:
+        return f"run:idempotency:{user_id}:{client_id}"
+
+    def _channel(self, run_id: str) -> str:
+        return f"run:{run_id}:events"
+
     async def create_run(self, user_id: str, client_id: str | None) -> tuple[str, RunRecord]:
-        async with self._lock:
-            if client_id:
-                key = f"{user_id}:{client_id}"
-                run_id = self._idempotency.get(key)
-                if run_id and run_id in self._runs:
-                    return run_id, self._runs[run_id]
-            run_id = uuid.uuid4().hex
-            trace_id = uuid.uuid4().hex
-            started_at = int(time.time() * 1000)
-            record = RunRecord(
-                status="RUNNING",
-                started_at=started_at,
-                trace_id=trace_id,
-                module_summary=_init_module_summary(),
-            )
-            self._runs[run_id] = record
-            if client_id:
-                self._idempotency[f"{user_id}:{client_id}"] = run_id
-            return run_id, record
+        if client_id:
+            idem_key = self._key_idempotency(user_id, client_id)
+            existing = await self.redis.get(idem_key)
+            if existing:
+                existing_record = await self.get_run(existing)
+                if existing_record:
+                    return existing, existing_record
 
-    # 查询 run
+        run_id = uuid.uuid4().hex
+        trace_id = uuid.uuid4().hex
+        started_at = int(time.time() * 1000)
+        record = RunRecord(
+            status="RUNNING",
+            started_at=started_at,
+            trace_id=trace_id,
+            module_summary=_init_module_summary(),
+        )
+        await self._save_run(run_id, record)
+        if client_id:
+            await self.redis.set(self._key_idempotency(user_id, client_id), run_id, ex=self.ttl_seconds)
+        return run_id, record
+
     async def get_run(self, run_id: str) -> RunRecord | None:
-        async with self._lock:
-            return self._runs.get(run_id)
+        raw = await self.redis.get(self._key_record(run_id))
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+            return RunRecord.from_dict(data)
+        except Exception:
+            return None
 
-    # 订阅事件队列（SSE）
     async def subscribe(self, run_id: str) -> asyncio.Queue[str] | None:
-        async with self._lock:
-            record = self._runs.get(run_id)
-            if not record:
-                return None
-            queue: asyncio.Queue[str] = asyncio.Queue()
-            record.subscribers.append(queue)
-            return queue
+        record = await self.get_run(run_id)
+        if not record:
+            return None
+        pubsub = self.redis.pubsub()
+        await pubsub.subscribe(self._channel(run_id))
+        queue: asyncio.Queue[str] = asyncio.Queue()
 
-    # 取消订阅
+        async def reader():
+            try:
+                async for message in pubsub.listen():
+                    if message.get("type") != "message":
+                        continue
+                    data = message.get("data")
+                    if data is None:
+                        continue
+                    await queue.put(data)
+            finally:
+                try:
+                    await pubsub.unsubscribe(self._channel(run_id))
+                finally:
+                    await pubsub.close()
+
+        task = asyncio.create_task(reader())
+        self._subscriber_tasks[queue] = task
+        return queue
+
     async def unsubscribe(self, run_id: str, queue: asyncio.Queue[str]) -> None:
-        async with self._lock:
-            record = self._runs.get(run_id)
-            if not record:
-                return
-            if queue in record.subscribers:
-                record.subscribers.remove(queue)
+        task = self._subscriber_tasks.pop(queue, None)
+        if task:
+            task.cancel()
+            with contextlib.suppress(Exception):
+                await task
 
-    # 发布事件并更新模块汇总
     async def publish(self, run_id: str, event_name: str, payload: dict[str, Any]) -> None:
-        async with self._lock:
-            record = self._runs.get(run_id)
-            if not record:
-                return
-            record.seq_counter += 1
-            data = {
-                "protocolVersion": "1.0",
-                "runId": run_id,
-                "ts": int(time.time() * 1000),
-                "event": event_name,
-                "seq": record.seq_counter,
-                "payload": payload,
-            }
-            self._update_summary(record, event_name, payload)
-            message = _sse_event(event_name, data)
-            for queue in list(record.subscribers):
-                queue.put_nowait(message)
+        record = await self.get_run(run_id)
+        if not record:
+            return
+        record.seq_counter += 1
+        data = {
+            "protocolVersion": "1.0",
+            "runId": run_id,
+            "ts": int(time.time() * 1000),
+            "event": event_name,
+            "seq": record.seq_counter,
+            "payload": payload,
+        }
+        self._update_summary(record, event_name, payload)
+        await self._save_run(run_id, record)
+        message = _sse_event(event_name, data)
+        await self.redis.publish(self._channel(run_id), message)
 
-    # 基于事件实时更新模块汇总与最终结果
     def _update_summary(self, record: RunRecord, event_name: str, payload: dict[str, Any]) -> None:
         modules = record.module_summary
         if event_name == "run.start":
@@ -270,6 +320,10 @@ class RunStore:
             if not ok:
                 modules["summary"]["answerStatus"] = "fail"
 
+    async def _save_run(self, run_id: str, record: RunRecord) -> None:
+        payload = json.dumps(record.to_dict(), ensure_ascii=False)
+        await self.redis.set(self._key_record(run_id), payload, ex=self.ttl_seconds)
+
 
 def _init_module_summary() -> dict[str, Any]:
     """初始化模块汇总状态。"""
@@ -306,4 +360,4 @@ def _sse_event(event: str, data_obj: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {payload}\n\n"
 
 
-run_store = RunStore()
+run_store = RunStore()

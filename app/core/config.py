@@ -1,4 +1,3 @@
-# ??????????????????
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings
@@ -25,12 +24,14 @@ class Settings(BaseSettings):
     ragflow_api_key: str = ""
     ragflow_top_k_default: int = 4
     ragflow_kb_id: str | None = None
-    # 可选：RAGFlow /v1/retrieval 的 dataset_ids（逗号分隔）
+    # 可选：RAGFlow /v1/retrieval 的 dataset_ids，逗号分隔
     ragflow_dataset_ids: str = ""
     # 可选：RAGFlow rerank_id
     ragflow_rerank_id: str | None = None
     school_api_base: str = ""
     school_api_timeout: float = 30.0
+    redis_url: str = "redis://117.72.149.125:6379/0"
+    redis_ttl_minutes: int = 30
 
     class Config:
         env_file = ".env"

@@ -243,6 +243,7 @@ async def synth_final(state: AgentState) -> AgentState:
             ),
         },
     ]
+    emit_event(state, "summary.start", {"stage": "final"}, status="running", step_id="summary")
     answer = await _stream_llm(
         state,
         prompt,
@@ -252,7 +253,7 @@ async def synth_final(state: AgentState) -> AgentState:
         think_start_event="summary.think.start",
         think_end_event="summary.think.end",
         think_step_id="summary.think",
-        emit_content_events=False,
+        emit_content_events=True,
     )
     final_payload = {
         "answer": answer,
@@ -263,8 +264,6 @@ async def synth_final(state: AgentState) -> AgentState:
             "tool_errors": state.get("tool_errors", []),
         },
     }
-    emit_event(state, "summary.start", {"stage": "final"}, status="running", step_id="summary")
-    emit_event(state, "summary.delta", {"text": answer}, status="running", step_id="summary")
     emit_event(state, "summary.end", final_payload, status="succeeded", step_id="summary")
     # summary 结束后输出表格事件（table.<toolName>）
     emit_table_events(state)

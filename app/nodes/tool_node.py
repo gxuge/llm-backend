@@ -33,7 +33,6 @@ async def tool_node(state: AgentState) -> AgentState:
     tool_errors = list(state.get("tool_errors", []))
     computed: dict[str, Any] | None = None
     group_id = state.get("tool_group_id") or uuid.uuid4().hex
-    emit_event(state, "tool.start", {"group_id": group_id}, status="running", group_id=group_id)
 
     token = state.get("access_token")
     if token:

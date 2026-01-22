@@ -125,8 +125,17 @@ def plan_tools(state: AgentState) -> AgentState:
             )
 
     updates["tool_round"] = tool_round + 1
-    tool_group_id = uuid.uuid4().hex
+    tool_group_id = state.get("tool_group_id") or uuid.uuid4().hex
     updates["tool_group_id"] = tool_group_id
+    if tool_calls and not state.get("tool_started"):
+        emit_event(
+            state,
+            "tool.start",
+            {"group_id": tool_group_id},
+            status="running",
+            group_id=tool_group_id,
+        )
+        updates["tool_started"] = True
     for call in tool_calls:
         emit_event(
             state,

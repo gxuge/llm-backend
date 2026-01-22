@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.services.run_store import run_store
+from app.services.run_store import RunRecord, run_store
 from app.workflows.sz_exam_agent import stream_agent
 
 router = APIRouter(tags=["InternalRuns"])
@@ -41,7 +41,7 @@ class RunStartResponse(BaseModel):
     traceId: str | None = None
 
 
-# 解析 sse_event 产出的文本块，提取 event/data
+# 解析 sse_event 产生的文本块，提取 event/data
 def _parse_sse_event(raw: str) -> tuple[str | None, dict[str, Any] | None]:
     blocks = [block for block in raw.split("\n\n") if block.strip()]
     for block in blocks:
@@ -100,17 +100,16 @@ def _strip_meta(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _map_event(event_name: str, payload: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
-    """Map workflow SSE events to canonical events."""
+    """将工作流侧的 SSE 事件映射为内部通用事件。"""
     mapped: list[tuple[str, dict[str, Any]]] = []
-    # 表格事件由 Python 端直接定义，透传 payload 即可
+    # 表格事件：Python 端直接定义，透传 payload 即可
     if event_name.startswith("table."):
         clean = _strip_meta(payload) if isinstance(payload, dict) else {"data": payload}
         return [(event_name, clean)]
     if event_name in CANONICAL_EVENTS:
-        if event_name == "run.start":
-            clean = _strip_meta(payload) if isinstance(payload, dict) else {"data": payload}
-            return [(event_name, clean)]
         clean = _strip_meta(payload) if isinstance(payload, dict) else {"data": payload}
+        if event_name == "run.start":
+            return [(event_name, clean)]
         if event_name.endswith(".delta"):
             delta_value = clean.get("delta") or clean.get("text") or clean.get("content") or ""
             return [(event_name, {"delta": delta_value})]
@@ -190,11 +189,18 @@ def _map_event(event_name: str, payload: dict[str, Any]) -> list[tuple[str, dict
 
 
 async def _execute_run(run_id: str, payload: RunRequest) -> None:
-    """Execute workflow and publish canonical events."""
+    """执行工作流并把事件转换、发布到内部通道。"""
 
+    summary_started = False
     summary_ended = False
     run_ended = False
+    tool_started = False
+    saw_think_start = False
+    saw_think_delta = False
+    saw_think_end = False
     try:
+        record = await run_store.get_run(run_id)
+        trace_id = record.trace_id if record else None
         await run_store.publish(
             run_id,
             "run.start",
@@ -203,13 +209,11 @@ async def _execute_run(run_id: str, payload: RunRequest) -> None:
                 "messageId": payload.messageId,
                 "model": payload.model,
                 "input": payload.input,
-                "traceId": run_store._runs.get(run_id).trace_id if run_id in run_store._runs else None,
+                "traceId": trace_id,
                 "clientId": payload.clientId,
             },
         )
-        await run_store.publish(run_id, "summary.start", {"ok": True})
         async for chunk in stream_agent(payload.input, access_token=payload.accessToken):
-            # ?? chunk ??? SSE ???
             block = chunk.strip()
             if not block:
                 continue
@@ -217,16 +221,65 @@ async def _execute_run(run_id: str, payload: RunRequest) -> None:
             if not event_name or data is None:
                 continue
             for mapped_name, mapped_payload in _map_event(event_name, data):
+                if mapped_name == "summary.think.start":
+                    saw_think_start = True
+                elif mapped_name == "summary.think.delta":
+                    saw_think_delta = True
+                elif mapped_name == "summary.think.end":
+                    saw_think_end = True
+
+                if mapped_name == "summary.start":
+                    if summary_started:
+                        continue
+                    summary_started = True
+                    await run_store.publish(run_id, mapped_name, mapped_payload)
+                    continue
+
+                if mapped_name.startswith("tool."):
+                    if mapped_name == "tool.start":
+                        if tool_started:
+                            continue
+                        tool_started = True
+                        await run_store.publish(run_id, mapped_name, mapped_payload)
+                        continue
+                    if not tool_started:
+                        tool_started = True
+                    await run_store.publish(run_id, mapped_name, mapped_payload)
+                    continue
+
+                if mapped_name.startswith("summary.") and mapped_name not in {
+                    "summary.start",
+                    "summary.think.start",
+                    "summary.think.delta",
+                    "summary.think.end",
+                }:
+                    if not summary_started:
+                        await run_store.publish(run_id, "summary.start", {"ok": True})
+                        summary_started = True
+
+                if mapped_name in {"summary.end", "run.end"}:
+                    if (saw_think_start or saw_think_delta) and not saw_think_end:
+                        await run_store.publish(run_id, "summary.think.end", {})
+                        saw_think_end = True
                 await run_store.publish(run_id, mapped_name, mapped_payload)
                 if mapped_name == "summary.end":
                     summary_ended = True
                 if mapped_name == "run.end":
                     run_ended = True
         if not summary_ended:
-            record = run_store._runs.get(run_id)
+            record = await run_store.get_run(run_id)
             answer_text = record.summary_text if record else ""
+            if (saw_think_start or saw_think_delta) and not saw_think_end:
+                await run_store.publish(run_id, "summary.think.end", {})
+                saw_think_end = True
+            if not summary_started:
+                await run_store.publish(run_id, "summary.start", {"ok": True})
+                summary_started = True
             await run_store.publish(run_id, "summary.end", {"ok": True, "answer": answer_text})
         if not run_ended:
+            if (saw_think_start or saw_think_delta) and not saw_think_end:
+                await run_store.publish(run_id, "summary.think.end", {})
+                saw_think_end = True
             await run_store.publish(
                 run_id,
                 "run.end",
@@ -257,7 +310,7 @@ async def start_run(payload: RunRequest) -> RunStartResponse:
 
 @router.get("/internal/runs/events")
 async def stream_events(runId: str = Query(..., alias="runId")) -> StreamingResponse:
-    """订阅 run 的 SSE 事件流。"""
+    """订阅指定 run 的 SSE 事件流。"""
 
     queue = await run_store.subscribe(runId)
     if not queue:
@@ -291,4 +344,4 @@ async def run_result(runId: str = Query(..., alias="runId")) -> dict[str, Any]:
         "error": record.error,
         "finishedAt": record.finished_at,
         "modules": record.module_summary,
-    }
+    }
