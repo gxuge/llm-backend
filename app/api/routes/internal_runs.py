@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.services.run_store import RunRecord, run_store
+from app.workflows.default_agent import stream_default_agent
 from app.workflows.sz_exam_agent import stream_agent
 
 router = APIRouter(tags=["InternalRuns"])
@@ -19,6 +20,7 @@ class RunRequest(BaseModel):
     """内部运行请求体。"""
 
     userId: str = Field(..., description="User id for audit/isolation")
+    sessionRole: Literal["planner", "default"] = Field(..., description="Session role: planner or default")
     sessionId: str | None = None
     topicId: str | None = None
     messageId: str | None = None
@@ -213,7 +215,16 @@ async def _execute_run(run_id: str, payload: RunRequest) -> None:
                 "clientId": payload.clientId,
             },
         )
-        async for chunk in stream_agent(payload.input, access_token=payload.accessToken):
+        if payload.sessionRole == "default":
+            stream = stream_default_agent(
+                input_text=payload.input,
+                messages=payload.messages,
+                model=payload.model,
+                sampling=payload.sampling,
+            )
+        else:
+            stream = stream_agent(payload.input, access_token=payload.accessToken)
+        async for chunk in stream:
             block = chunk.strip()
             if not block:
                 continue
@@ -301,7 +312,7 @@ async def _execute_run(run_id: str, payload: RunRequest) -> None:
 async def start_run(payload: RunRequest) -> RunStartResponse:
     """启动一次 run（快速返回，后台异步执行）。"""
 
-    if not payload.userId or not payload.input or not payload.sessionId or not payload.messageId:
+    if not payload.userId or not payload.input or not payload.sessionId or not payload.messageId or not payload.sessionRole:
         raise HTTPException(status_code=400, detail="missing required fields")
     run_id, record = await run_store.create_run(payload.userId, payload.clientId)
     asyncio.create_task(_execute_run(run_id, payload))
