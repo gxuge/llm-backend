@@ -2,12 +2,12 @@ pipeline {
   agent any
 
   environment {
-    IMAGE_NAME = 'your-registry/fastapi-langgraph'
+    IMAGE_NAME = 'fastapi-langgraph'
     IMAGE_TAG  = "${env.GIT_COMMIT}"
-    DEPLOY_HOST = 'your.server.ip'
-    DEPLOY_USER = 'your_user'
+    DEPLOY_HOST = '117.72.149.125'
+    DEPLOY_USER = 'root'
     DEPLOY_PATH = '/opt/fastapi-langgraph'
-    COMPOSE_FILE = 'docker-compose.prod.yml'
+    COMPOSE_FILE = 'docker-compose.yml'
   }
 
   stages {
