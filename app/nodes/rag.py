@@ -110,8 +110,6 @@ async def _fastgpt_retrieve(question: str) -> tuple[list[str], list[Citation]]:
     if response.status_code >= 400:
         raise ValueError(f"FastGPT error {response.status_code}: {response.text}")
     data = response.json()
-    logger.warning("fastgpt searchTest response=%s", data)
-    print(f"fastgpt searchTest response={data}")
     data_block = data.get("data") if isinstance(data, dict) else {}
     if not isinstance(data_block, dict):
         data_block = {}
@@ -150,7 +148,6 @@ async def rag_retrieve(state: AgentState) -> AgentState:
     error_message: str | None = None
     try:
         provider = (settings.rag_provider or "ragflow").lower()
-        logger.warning("rag provider=%s", provider)
         if provider == "fastgpt":
             contexts, citations = await _fastgpt_retrieve(question)
         else:

@@ -23,15 +23,6 @@ pipeline {
       }
     }
 
-    stage('Push Image') {
-      steps {
-        withCredentials([usernamePassword(credentialsId: 'docker-registry', usernameVariable: 'REG_USER', passwordVariable: 'REG_PASS')]) {
-          sh 'echo $REG_PASS | docker login -u $REG_USER --password-stdin'
-          sh 'docker push $IMAGE_NAME:$IMAGE_TAG'
-        }
-      }
-    }
-
     stage('Deploy') {
       steps {
         sshagent(credentials: ['deploy-ssh']) {
