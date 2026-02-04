@@ -6,7 +6,7 @@ from app.nodes.planner import plan_tools
 from app.nodes.rag import rag_retrieve
 from app.nodes.router import route_tools
 from app.nodes.state import AgentState
-from app.nodes.synth import pre_synth, rag_summary, synth_final, tool_summary
+from app.nodes.llm_stream_node import pre_synth, rag_summary, synth_final, tool_summary
 from app.nodes.tool_node import tool_node
 from app.nodes.viz import viz_builder
 

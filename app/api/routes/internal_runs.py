@@ -3,17 +3,21 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+import logging
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.services.run_store import RunRecord, run_store
+from app.core.langfuse import flush_langfuse, set_current_trace, start_trace
+from app.services.run_store import RedisUnavailableError, RunRecord, run_store
 from app.workflows.default_agent import stream_default_agent
 from app.workflows.sz_exam_agent import stream_agent
 
 router = APIRouter(tags=["InternalRuns"])
+logger = logging.getLogger(__name__)
+RUN_TASKS: dict[str, asyncio.Task] = {}
 
 
 class RunRequest(BaseModel):
@@ -89,6 +93,7 @@ CANONICAL_EVENTS = {
     "summary.think.end",
     "summary.start",
     "summary.delta",
+    "summary.error",
     "summary.end",
     "viz.table",
     "trace.event",
@@ -200,20 +205,25 @@ async def _execute_run(run_id: str, payload: RunRequest) -> None:
     saw_think_start = False
     saw_think_delta = False
     saw_think_end = False
+    rag_error_payload: dict[str, Any] | None = None
+    tool_error_payload: dict[str, Any] | None = None
+    summary_error_payload: dict[str, Any] | None = None
+    summary_error_sent = False
+    trace = start_trace(
+        trace_id=payload.sessionId,
+        session_id=payload.sessionId,
+        user_id=payload.userId,
+        name=f"exam.{payload.sessionRole}",
+        metadata={"run_id": run_id, "session_role": payload.sessionRole},
+    )
+    set_current_trace(trace)
     try:
         record = await run_store.get_run(run_id)
         trace_id = record.trace_id if record else None
         await run_store.publish(
             run_id,
             "run.start",
-            {
-                "sessionId": payload.sessionId,
-                "messageId": payload.messageId,
-                "model": payload.model,
-                "input": payload.input,
-                "traceId": trace_id,
-                "clientId": payload.clientId,
-            },
+            {"runId": run_id, "traceId": trace_id},
         )
         if payload.sessionRole == "default":
             stream = stream_default_agent(
@@ -223,7 +233,7 @@ async def _execute_run(run_id: str, payload: RunRequest) -> None:
                 sampling=payload.sampling,
             )
         else:
-            stream = stream_agent(payload.input, access_token=payload.accessToken)
+            stream = stream_agent(payload.input, access_token=payload.accessToken, sampling=payload.sampling)
         async for chunk in stream:
             block = chunk.strip()
             if not block:
@@ -232,12 +242,51 @@ async def _execute_run(run_id: str, payload: RunRequest) -> None:
             if not event_name or data is None:
                 continue
             for mapped_name, mapped_payload in _map_event(event_name, data):
+                if mapped_name == "run.end":
+                    continue
+                if mapped_name == "rag.error":
+                    if rag_error_payload is None and isinstance(mapped_payload, dict):
+                        rag_error_payload = mapped_payload
+                    continue
+                if mapped_name == "tool.error":
+                    if tool_error_payload is None and isinstance(mapped_payload, dict):
+                        tool_error_payload = mapped_payload
+                    continue
+                if mapped_name == "summary.error":
+                    if summary_error_payload is None and isinstance(mapped_payload, dict):
+                        summary_error_payload = mapped_payload
+                    continue
                 if mapped_name == "summary.think.start":
                     saw_think_start = True
                 elif mapped_name == "summary.think.delta":
                     saw_think_delta = True
                 elif mapped_name == "summary.think.end":
                     saw_think_end = True
+
+                if rag_error_payload:
+                    if mapped_name == "rag.summary.end":
+                        continue
+                    if mapped_name == "rag.end":
+                        await run_store.publish(run_id, "rag.error", rag_error_payload)
+                        rag_error_payload = None
+                        continue
+
+                if tool_error_payload:
+                    if mapped_name == "tool.summary.end":
+                        continue
+                    if mapped_name == "tool.end":
+                        await run_store.publish(run_id, "tool.error", tool_error_payload)
+                        tool_error_payload = None
+                        continue
+
+                if summary_error_payload and not summary_error_sent:
+                    if mapped_name == "summary.think.end":
+                        continue
+                    if mapped_name == "summary.end":
+                        await run_store.publish(run_id, "summary.error", summary_error_payload)
+                        summary_error_sent = True
+                        summary_ended = True
+                        continue
 
                 if mapped_name == "summary.start":
                     if summary_started:
@@ -268,15 +317,18 @@ async def _execute_run(run_id: str, payload: RunRequest) -> None:
                         await run_store.publish(run_id, "summary.start", {"ok": True})
                         summary_started = True
 
-                if mapped_name in {"summary.end", "run.end"}:
-                    if (saw_think_start or saw_think_delta) and not saw_think_end:
+                if mapped_name == "summary.end":
+                    if (
+                        (saw_think_start or saw_think_delta)
+                        and not saw_think_end
+                        and not summary_error_payload
+                        and not summary_error_sent
+                    ):
                         await run_store.publish(run_id, "summary.think.end", {})
                         saw_think_end = True
                 await run_store.publish(run_id, mapped_name, mapped_payload)
                 if mapped_name == "summary.end":
                     summary_ended = True
-                if mapped_name == "run.end":
-                    run_ended = True
         if not summary_ended:
             record = await run_store.get_run(run_id)
             answer_text = record.summary_text if record else ""
@@ -300,24 +352,63 @@ async def _execute_run(run_id: str, payload: RunRequest) -> None:
                     "tokens": {"prompt": None, "completion": None, "total": None},
                 },
             )
+            run_ended = True
+    except asyncio.CancelledError:
+        await run_store.publish(
+            run_id,
+            "run.cancel",
+            {
+                "ok": False,
+                "reason": "cancelled",
+                "finishedAt": int(time.time() * 1000),
+                "tokens": {"prompt": None, "completion": None, "total": None},
+            },
+        )
+        return
+    except RedisUnavailableError:
+        logger.error("Redis unavailable during run execution")
+        return
     except Exception as exc:
         await run_store.publish(
             run_id,
             "run.error",
             {"message": str(exc), "code": "PY_RUN_EXCEPTION", "stack": None},
         )
+    finally:
+        set_current_trace(None)
+        flush_langfuse()
 
 
 @router.post("/internal/runs", response_model=RunStartResponse)
 async def start_run(payload: RunRequest) -> RunStartResponse:
     """启动一次 run（快速返回，后台异步执行）。"""
 
+    try:
+        payload_dict = payload.dict()
+    except Exception:
+        payload_dict = payload.model_dump()
+    if "accessToken" in payload_dict:
+        payload_dict["accessToken"] = "***"
+    logger.info("internal_runs payload=%s", json.dumps(payload_dict, ensure_ascii=False))
+
     if not payload.userId or not payload.input or not payload.sessionId or not payload.messageId or not payload.sessionRole:
         raise HTTPException(status_code=400, detail="missing required fields")
     run_id, record = await run_store.create_run(payload.userId, payload.clientId)
-    asyncio.create_task(_execute_run(run_id, payload))
+    task = asyncio.create_task(_execute_run(run_id, payload))
+    RUN_TASKS[run_id] = task
+    task.add_done_callback(lambda _task: RUN_TASKS.pop(run_id, None))
     return RunStartResponse(runId=run_id, status="RUNNING", startedAt=record.started_at, traceId=record.trace_id)
 
+
+@router.post("/internal/runs/cancel")
+async def cancel_run(runId: str = Query(..., alias="runId")) -> dict[str, Any]:
+    """取消指定 run，触发任务终止并返回 run.end。"""
+
+    task = RUN_TASKS.get(runId)
+    if not task:
+        raise HTTPException(status_code=404, detail="runId not found or already finished")
+    task.cancel()
+    return {"ok": True, "runId": runId}
 
 @router.get("/internal/runs/events")
 async def stream_events(runId: str = Query(..., alias="runId")) -> StreamingResponse:

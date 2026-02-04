@@ -3,15 +3,23 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 
 from app.core.config import settings
 from app.core.redis import get_redis
+
+logger = logging.getLogger(__name__)
+
+
+class RedisUnavailableError(RuntimeError):
+    """Raised when Redis is unavailable or connection is closed."""
 
 
 @dataclass
@@ -30,6 +38,7 @@ class RunRecord:
     rag_summary_text: str = ""
     summary_text: str = ""
     think_text: str = ""
+    tool_text: str = ""
     tool_calls: dict[str, dict[str, Any]] = field(default_factory=dict)
     rag_started: bool = False
     rag_ended: bool = False
@@ -66,6 +75,10 @@ class RunStore:
         self.ttl_seconds = settings.redis_ttl_minutes * 60
         self._subscriber_tasks: dict[asyncio.Queue[str], asyncio.Task] = {}
 
+    def _raise_redis_error(self, action: str, exc: Exception) -> None:
+        logger.error("Redis error during %s: %s", action, exc)
+        raise RedisUnavailableError("Redis unavailable") from exc
+
     def _key_record(self, run_id: str) -> str:
         return f"run:{run_id}:record"
 
@@ -78,7 +91,10 @@ class RunStore:
     async def create_run(self, user_id: str, client_id: str | None) -> tuple[str, RunRecord]:
         if client_id:
             idem_key = self._key_idempotency(user_id, client_id)
-            existing = await self.redis.get(idem_key)
+            try:
+                existing = await self.redis.get(idem_key)
+            except RedisError as exc:
+                self._raise_redis_error("create_run.get_idempotency", exc)
             if existing:
                 existing_record = await self.get_run(existing)
                 if existing_record:
@@ -95,11 +111,17 @@ class RunStore:
         )
         await self._save_run(run_id, record)
         if client_id:
-            await self.redis.set(self._key_idempotency(user_id, client_id), run_id, ex=self.ttl_seconds)
+            try:
+                await self.redis.set(self._key_idempotency(user_id, client_id), run_id, ex=self.ttl_seconds)
+            except RedisError as exc:
+                self._raise_redis_error("create_run.set_idempotency", exc)
         return run_id, record
 
     async def get_run(self, run_id: str) -> RunRecord | None:
-        raw = await self.redis.get(self._key_record(run_id))
+        try:
+            raw = await self.redis.get(self._key_record(run_id))
+        except RedisError as exc:
+            self._raise_redis_error("get_run", exc)
         if not raw:
             return None
         try:
@@ -113,7 +135,11 @@ class RunStore:
         if not record:
             return None
         pubsub = self.redis.pubsub()
-        await pubsub.subscribe(self._channel(run_id))
+        try:
+            await pubsub.subscribe(self._channel(run_id))
+        except RedisError as exc:
+            await pubsub.close()
+            self._raise_redis_error("subscribe", exc)
         queue: asyncio.Queue[str] = asyncio.Queue()
 
         async def reader():
@@ -158,7 +184,10 @@ class RunStore:
         self._update_summary(record, event_name, payload)
         await self._save_run(run_id, record)
         message = _sse_event(event_name, data)
-        await self.redis.publish(self._channel(run_id), message)
+        try:
+            await self.redis.publish(self._channel(run_id), message)
+        except RedisError as exc:
+            self._raise_redis_error("publish", exc)
 
     def _update_summary(self, record: RunRecord, event_name: str, payload: dict[str, Any]) -> None:
         modules = record.module_summary
@@ -236,6 +265,7 @@ class RunStore:
         elif event_name == "tool.summary.delta":
             modules["tools"]["used"] = True
             record.tools_started = True
+            record.tool_text += payload.get("delta", "")
         elif event_name == "tool.summary.end":
             modules["tools"]["used"] = True
             record.tools_started = True
@@ -268,6 +298,17 @@ class RunStore:
             record.summary_started = True
         elif event_name == "summary.delta":
             record.summary_text += payload.get("delta", "")
+        elif event_name == "summary.error":
+            record.summary_ended = True
+            modules["summary"]["answerStatus"] = "fail"
+            modules["summary"]["error"] = payload
+            if record.think_started:
+                modules["summary"]["thinkStatus"] = "fail"
+            record.result["content"] = record.summary_text
+            record.result["reasoning"] = record.think_text
+            record.result["raw"] = payload
+            record.finished_at = payload.get("finishedAt") or int(time.time() * 1000)
+            record.status = "FAIL"
         elif event_name == "summary.end":
             record.summary_ended = True
             ok = payload.get("ok", True)
@@ -295,6 +336,8 @@ class RunStore:
                 record.result["content"] = record.summary_text
             if not record.result.get("reasoning"):
                 record.result["reasoning"] = record.think_text
+            if record.tool_text and not record.result.get("toolSummary"):
+                record.result["toolSummary"] = record.tool_text
 
             if record.rag_started and modules["rag"]["status"] == "not_used":
                 modules["rag"]["status"] = "fail" if not record.rag_ended else modules["rag"]["status"]
@@ -320,9 +363,23 @@ class RunStore:
             if not ok:
                 modules["summary"]["answerStatus"] = "fail"
 
+        if event_name == "run.cancel":
+            record.status = "CANCELLED"
+            record.finished_at = payload.get("finishedAt") or int(time.time() * 1000)
+            if not record.result.get("content"):
+                record.result["content"] = record.summary_text
+            if not record.result.get("reasoning"):
+                record.result["reasoning"] = record.think_text
+            if record.tool_text and not record.result.get("toolSummary"):
+                record.result["toolSummary"] = record.tool_text
+            modules["summary"]["answerStatus"] = "fail"
+
     async def _save_run(self, run_id: str, record: RunRecord) -> None:
         payload = json.dumps(record.to_dict(), ensure_ascii=False)
-        await self.redis.set(self._key_record(run_id), payload, ex=self.ttl_seconds)
+        try:
+            await self.redis.set(self._key_record(run_id), payload, ex=self.ttl_seconds)
+        except RedisError as exc:
+            self._raise_redis_error("save_run", exc)
 
 
 def _init_module_summary() -> dict[str, Any]:

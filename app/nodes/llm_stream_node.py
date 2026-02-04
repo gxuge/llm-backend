@@ -4,8 +4,9 @@ import json
 from typing import Any
 
 from app.core.config import settings
+from app.core.langfuse import end_span, get_current_trace, start_span
 from app.nodes.state import AgentState
-from app.nodes.utils import build_context_block, extract_records
+from app.nodes.utils import build_context_block
 from app.prompts.exam_agent import (
     final_synth_system_prompt,
     pre_synth_system_prompt,
@@ -13,8 +14,24 @@ from app.prompts.exam_agent import (
     tool_summary_system_prompt,
 )
 from app.services.modelscope import stream_chat_completion
-from app.tables.tool_table_schemas import TOOL_TABLE_SCHEMAS, build_table_payload
+from app.services.run_store import _sse_event
 from src.exam_agent.services.events import emit_event
+
+
+def _sampling_value(sampling: dict[str, Any] | None, key: str, default: Any) -> Any:
+    if not sampling:
+        return default
+    return sampling.get(key, default)
+
+
+def _extract_enable_think(state: AgentState) -> bool:
+    value = state.get("enable_think")
+    return bool(value) if value is not None else False
+
+
+def _extract_show_think(state: AgentState) -> bool:
+    value = state.get("show_think")
+    return bool(value) if value is not None else False
 
 
 async def _stream_llm(
@@ -29,8 +46,9 @@ async def _stream_llm(
     think_end_event: str | None = None,
     think_step_id: str | None = None,
     emit_content_events: bool = True,
+    enable_think: bool = False,
+    show_think: bool = False,
 ) -> str:
-    # 流式调用 LLM，并按需拆分为 summary/think 事件
     buffer_text: list[str] = []
     think_started = False
     stream = await stream_chat_completion(
@@ -83,7 +101,7 @@ async def _stream_llm(
                             parent_id=parent_id,
                         )
                 reasoning = payload.get("reasoning_content") or ""
-                if reasoning and think_event_name:
+                if reasoning and enable_think and think_event_name and show_think:
                     if think_start_event and not think_started:
                         emit_event(
                             state,
@@ -114,8 +132,68 @@ async def _stream_llm(
     return "".join(buffer_text)
 
 
+async def stream_llm_sse(
+    *,
+    messages: list[dict[str, Any]],
+    model: str,
+    sampling: dict[str, Any] | None,
+    enable_think: bool,
+    show_think: bool,
+    event_prefix: str,
+    content_parts: list[str],
+    reasoning_parts: list[str],
+):
+    stream = await stream_chat_completion(
+        messages,
+        model=model,
+        temperature=_sampling_value(sampling, "temperature", settings.model_temperature_default),
+        top_p=_sampling_value(sampling, "top_p", settings.model_top_p_default),
+        presence_penalty=_sampling_value(sampling, "presence_penalty", settings.model_presence_penalty_default),
+        frequency_penalty=_sampling_value(sampling, "frequency_penalty", settings.model_frequency_penalty_default),
+        max_tokens=_sampling_value(sampling, "max_tokens", settings.model_max_tokens_default),
+        stream=True,
+    )
+
+    text_buffer = ""
+    think_started = False
+
+    async for chunk in stream:
+        part = chunk.decode("utf-8", errors="ignore")
+        text_buffer += part
+        while "\n\n" in text_buffer:
+            block, text_buffer = text_buffer.split("\n\n", 1)
+            for line in block.splitlines():
+                if not line.startswith("data:"):
+                    continue
+                data = line[len("data:") :].strip()
+                if not data:
+                    continue
+                if data == "[DONE]":
+                    return
+                try:
+                    payload = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                content = payload.get("content") or ""
+                reasoning = payload.get("reasoning_content") or ""
+                if content:
+                    content_parts.append(content)
+                    yield _sse_event(f"{event_prefix}.delta", {"text": content})
+                if reasoning and enable_think and show_think:
+                    if not think_started:
+                        think_started = True
+                        yield _sse_event(f"{event_prefix}.think.start", {})
+                    reasoning_parts.append(reasoning)
+                    yield _sse_event(f"{event_prefix}.think.delta", {"text": reasoning})
+
+    if think_started and enable_think and show_think:
+        yield _sse_event(f"{event_prefix}.think.end", {})
+
+
 async def pre_synth(state: AgentState) -> AgentState:
     context_block = build_context_block(state.get("policy_context", []))
+    trace = get_current_trace()
+    span = start_span(trace, name="node.pre_synth", input_data={"context_count": len(state.get("policy_context", []))})
     emit_event(state, "summary.start", {"stage": "rag"}, status="running", step_id="summary.rag")
     prompt = [
         {"role": "system", "content": pre_synth_system_prompt()},
@@ -123,18 +201,30 @@ async def pre_synth(state: AgentState) -> AgentState:
     ]
     await _stream_llm(state, prompt, "summary.delta", step_id="summary.rag")
     emit_event(state, "summary.end", {"stage": "rag"}, status="succeeded", step_id="summary.rag")
+    end_span(span, output={"stage": "rag"})
     return {}
 
 
 async def rag_summary(state: AgentState) -> AgentState:
     """基于 RAG 上下文输出独立摘要流。"""
     context_block = build_context_block(state.get("policy_context", []))
+    trace = get_current_trace()
+    span = start_span(trace, name="node.rag_summary", input_data={"context_count": len(state.get("policy_context", []))})
     emit_event(state, "rag.summary.start", {"stage": "rag"}, status="running", step_id="rag.summary")
     prompt = [
         {"role": "system", "content": rag_summary_system_prompt()},
         {"role": "user", "content": f"问题：{state['question']}\n政策片段：\n{context_block}"},
     ]
-    await _stream_llm(state, prompt, "rag.summary.delta", step_id="rag.summary")
+    enable_think = _extract_enable_think(state)
+    show_think = False
+    await _stream_llm(
+        state,
+        prompt,
+        "rag.summary.delta",
+        step_id="rag.summary",
+        enable_think=enable_think,
+        show_think=show_think,
+    )
     emit_event(state, "rag.summary.end", {"stage": "rag"}, status="succeeded", step_id="rag.summary")
     emit_event(
         state,
@@ -143,11 +233,11 @@ async def rag_summary(state: AgentState) -> AgentState:
         status="succeeded",
         step_id="rag",
     )
+    end_span(span, output={"stage": "rag"})
     return {}
 
 
 def _sanitize_tool_data(tool_data: dict[str, Any], computed: dict[str, Any]) -> dict[str, Any]:
-    """工具摘要脱敏：仅保留白名单字段与少量样例。"""
     safe_payload: dict[str, Any] = {"tools": {}}
     tool_whitelist: dict[str, set[str]] = {
         "list_school_page": {
@@ -210,6 +300,8 @@ async def tool_summary(state: AgentState) -> AgentState:
     computed = state.get("computed", {})
     if not tool_data and not computed:
         return {}
+    trace = get_current_trace()
+    span = start_span(trace, name="node.tool_summary", input_data={"tool_count": len(tool_data)})
     group_id = state.get("tool_group_id")
     emit_event(state, "tool.summary.start", {"stage": "tools"}, status="running", step_id="tool.summary", group_id=group_id)
     safe_payload = _sanitize_tool_data(tool_data, computed)
@@ -217,10 +309,20 @@ async def tool_summary(state: AgentState) -> AgentState:
         {"role": "system", "content": tool_summary_system_prompt()},
         {"role": "user", "content": json.dumps(safe_payload, ensure_ascii=False)},
     ]
-    await _stream_llm(state, prompt, "tool.summary.delta", step_id="tool.summary")
+    enable_think = _extract_enable_think(state)
+    show_think = False
+    await _stream_llm(
+        state,
+        prompt,
+        "tool.summary.delta",
+        step_id="tool.summary",
+        enable_think=enable_think,
+        show_think=show_think,
+    )
     status = "failed" if state.get("tool_errors") else "succeeded"
     emit_event(state, "tool.summary.end", {"stage": "tools"}, status=status, step_id="tool.summary", group_id=group_id)
     emit_event(state, "tool.end", {"group_id": group_id}, status=status, group_id=group_id)
+    end_span(span, output={"status": status})
     return {}
 
 
@@ -230,6 +332,8 @@ async def synth_final(state: AgentState) -> AgentState:
     context_block = build_context_block(state.get("policy_context", []))
     tool_data = state.get("tool_data", {})
     computed = state.get("computed", {})
+    trace = get_current_trace()
+    span = start_span(trace, name="node.synth_final", input_data={"tool_count": len(tool_data)})
     prompt = [
         {"role": "system", "content": final_synth_system_prompt()},
         {
@@ -243,6 +347,8 @@ async def synth_final(state: AgentState) -> AgentState:
             ),
         },
     ]
+    enable_think = _extract_enable_think(state)
+    show_think = enable_think
     emit_event(state, "summary.start", {"stage": "final"}, status="running", step_id="summary")
     answer = await _stream_llm(
         state,
@@ -254,6 +360,8 @@ async def synth_final(state: AgentState) -> AgentState:
         think_end_event="summary.think.end",
         think_step_id="summary.think",
         emit_content_events=True,
+        enable_think=enable_think,
+        show_think=show_think,
     )
     final_payload = {
         "answer": answer,
@@ -265,41 +373,5 @@ async def synth_final(state: AgentState) -> AgentState:
         },
     }
     emit_event(state, "summary.end", final_payload, status="succeeded", step_id="summary")
-    # summary 结束后输出表格事件（table.<toolName>）
-    emit_table_events(state)
-    emit_event(state, "run.end", {"status": "ok"}, status="succeeded")
+    end_span(span, output={"answer_len": len(answer)})
     return {"final": final_payload}
-
-
-def _payload_is_success(payload: object) -> bool:
-    """判定工具调用是否成功（错误结构直接视为失败）。"""
-    return not (isinstance(payload, dict) and payload.get("error"))
-
-
-def _collect_tool_rows(tool_data: dict[str, list[Any]], tool_name: str) -> list[dict[str, Any]]:
-    """从工具结果中提取可用于表格渲染的行数据。"""
-    rows: list[dict[str, Any]] = []
-    for payload in tool_data.get(tool_name, []):
-        if not _payload_is_success(payload):
-            continue
-        rows.extend(extract_records(payload))
-    return rows
-
-
-def emit_table_events(state: AgentState) -> None:
-    """根据 tool 结果生成表格事件，仅成功且数据量>=2时输出。"""
-    tool_data = state.get("tool_data", {})
-    for tool_name in TOOL_TABLE_SCHEMAS.keys():
-        rows = _collect_tool_rows(tool_data, tool_name)
-        if len(rows) < 2:
-            continue
-        payload = build_table_payload(tool_name, rows)
-        if not payload:
-            continue
-        emit_event(
-            state,
-            f"table.{tool_name}",
-            payload,
-            status="succeeded",
-            step_id=f"table.{tool_name}",
-        )

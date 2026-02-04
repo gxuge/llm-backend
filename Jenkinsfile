@@ -1,58 +1,48 @@
-// ??????????????????
-def runCmd(String cmd) {
-  if (isUnix()) {
-    sh cmd
-  } else {
-    bat cmd
-  }
-}
-
-def copyEnvFile(String src) {
-  if (isUnix()) {
-    sh "cp \"${src}\" .env"
-  } else {
-    bat "copy /Y \"${src}\" .env"
-  }
-}
-
 pipeline {
   agent any
+
   environment {
-    APP_NAME = "llm-backend"
+    IMAGE_NAME = 'your-registry/fastapi-langgraph'
+    IMAGE_TAG  = "${env.GIT_COMMIT}"
+    DEPLOY_HOST = 'your.server.ip'
+    DEPLOY_USER = 'your_user'
+    DEPLOY_PATH = '/opt/fastapi-langgraph'
+    COMPOSE_FILE = 'docker-compose.prod.yml'
   }
+
   stages {
-    stage("Prep") {
+    stage('Checkout') {
       steps {
-        script {
-          if (env.ENV_FILE?.trim()) {
-            copyEnvFile(env.ENV_FILE)
-          }
-          if (!fileExists(".env")) {
-            error("Missing .env. Provide ENV_FILE (Jenkins file credential) or create .env on the agent.")
-          }
+        checkout scm
+      }
+    }
+
+    stage('Build Image') {
+      steps {
+        sh 'docker build -t $IMAGE_NAME:$IMAGE_TAG .'
+      }
+    }
+
+    stage('Push Image') {
+      steps {
+        withCredentials([usernamePassword(credentialsId: 'docker-registry', usernameVariable: 'REG_USER', passwordVariable: 'REG_PASS')]) {
+          sh 'echo $REG_PASS | docker login -u $REG_USER --password-stdin'
+          sh 'docker push $IMAGE_NAME:$IMAGE_TAG'
         }
       }
     }
-    stage("Build Image") {
+
+    stage('Deploy') {
       steps {
-        script {
-          runCmd("docker build -t ${env.APP_NAME}:${env.GIT_COMMIT} .")
+        sshagent(credentials: ['deploy-ssh']) {
+          sh '''
+            ssh -o StrictHostKeyChecking=no $DEPLOY_USER@$DEPLOY_HOST \
+              "cd $DEPLOY_PATH && \
+               export IMAGE_NAME=$IMAGE_NAME IMAGE_TAG=$IMAGE_TAG && \
+               docker compose -f $COMPOSE_FILE pull && \
+               docker compose -f $COMPOSE_FILE up -d"
+          '''
         }
-      }
-    }
-    stage("Deploy") {
-      steps {
-        script {
-          runCmd("docker compose down")
-          runCmd("docker compose up -d --build")
-        }
-      }
-    }
-  }
-  post {
-    always {
-      script {
-        runCmd("docker compose ps")
       }
     }
   }

@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     model_frequency_penalty_default: float = 0.0
     model_max_tokens_default: int | None = None
     model_stream_default: bool = False
+    rag_provider: str = "ragflow"
     ragflow_api_base: str = ""
     ragflow_api_key: str = ""
     ragflow_top_k_default: int = 4
@@ -28,10 +29,18 @@ class Settings(BaseSettings):
     ragflow_dataset_ids: str = ""
     # 可选：RAGFlow rerank_id
     ragflow_rerank_id: str | None = None
+    fastgpt_api_base: str = ""
+    fastgpt_api_key: str = ""
+    fastgpt_dataset_id: str = ""
+    fastgpt_top_k_default: int = 4
     school_api_base: str = ""
     school_api_timeout: float = 30.0
-    redis_url: str = "redis://117.72.149.125:6379/0"
+    redis_url: str = "redis://:Aaa635764803@117.72.149.125:6379/0"
     redis_ttl_minutes: int = 30
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_base_url: str = ""
+    langfuse_enabled: bool = False
 
     class Config:
         env_file = ".env"

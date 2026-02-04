@@ -6,6 +6,7 @@ from typing import Any
 import httpx
 
 from app.core.config import settings
+from app.core.langfuse import end_generation, get_current_trace, start_generation
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,14 @@ async def create_chat_completion(
         if value is not None:
             payload[key] = value
 
+    trace = get_current_trace()
+    generation = start_generation(
+        trace,
+        name="modelscope.chat",
+        model=model,
+        input_data={"messages": messages, "stream": stream},
+    )
+
     async with httpx.AsyncClient(timeout=60) as client:
         response = await client.post(url, headers=headers, json=payload)
 
@@ -74,7 +83,9 @@ async def create_chat_completion(
     if not content:
         raise ModelscopeChatError("ModelScope response missing `message.content`.")
 
-    return {"content": content, "reasoning": reasoning, "model": model, "raw": data}
+    result = {"content": content, "reasoning": reasoning, "model": model, "raw": data}
+    end_generation(generation, output=result)
+    return result
 
 
 async def stream_chat_completion(
@@ -123,6 +134,15 @@ async def stream_chat_completion(
         )
 
     async def _gen():
+        trace = get_current_trace()
+        generation = start_generation(
+            trace,
+            name="modelscope.stream",
+            model=model,
+            input_data={"messages": messages, "stream": True},
+        )
+        content_parts: list[str] = []
+        reasoning_parts: list[str] = []
         try:
             async with httpx.AsyncClient(timeout=None) as client:
                 async with client.stream("POST", url, headers=headers, json=payload) as response:
@@ -173,6 +193,10 @@ async def stream_chat_completion(
                                 )
                                 if not content and not reasoning:
                                     continue
+                                if content:
+                                    content_parts.append(content)
+                                if reasoning:
+                                    reasoning_parts.append(reasoning)
                                 compact: dict[str, Any] = {}
                                 if content:
                                     compact["content"] = content
@@ -190,5 +214,14 @@ async def stream_chat_completion(
             logger.exception("Unhandled ModelScope stream error")
             yield _error_event("Unexpected chat proxy error")
             yield b"data: [DONE]\n\n"
+        finally:
+            if generation is not None:
+                end_generation(
+                    generation,
+                    output={
+                        "content": "".join(content_parts),
+                        "reasoning": "".join(reasoning_parts),
+                    },
+                )
 
     return _gen()

@@ -5,10 +5,14 @@ from typing import Any
 import httpx
 
 from app.core.config import settings
+from app.core.langfuse import end_span, get_current_trace, start_span
 from app.nodes.state import AgentState
 from app.nodes.utils import split_dataset_ids
 from app.schemas.exam_agent import Citation
 from src.exam_agent.services.events import emit_event
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 async def _ragflow_retrieve(question: str) -> tuple[list[str], list[Citation]]:
@@ -83,12 +87,74 @@ async def _ragflow_retrieve(question: str) -> tuple[list[str], list[Citation]]:
     return contexts, citations
 
 
+async def _fastgpt_retrieve(question: str) -> tuple[list[str], list[Citation]]:
+    """调用 FastGPT searchTest 接口进行检索。"""
+    if not settings.fastgpt_api_base:
+        raise ValueError("FastGPT api_base not configured.")
+    if not settings.fastgpt_api_key:
+        raise ValueError("FastGPT api_key not configured.")
+    if not settings.fastgpt_dataset_id:
+        raise ValueError("FastGPT dataset_id not configured.")
+    url = settings.fastgpt_api_base.rstrip("/") + "/api/core/dataset/searchTest"
+    headers = {"Authorization": f"Bearer {settings.fastgpt_api_key}"}
+    payload: dict[str, Any] = {
+        "datasetId": settings.fastgpt_dataset_id,
+        "text": question,
+        "limit": 5000,
+        "similarity": 0.3,
+        "searchMode": "embedding",
+        "usingReRank": True,
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.post(url, json=payload, headers=headers)
+    if response.status_code >= 400:
+        raise ValueError(f"FastGPT error {response.status_code}: {response.text}")
+    data = response.json()
+    logger.warning("fastgpt searchTest response=%s", data)
+    print(f"fastgpt searchTest response={data}")
+    data_block = data.get("data") if isinstance(data, dict) else {}
+    if not isinstance(data_block, dict):
+        data_block = {}
+    items = data_block.get("list") or []
+    if not isinstance(items, list):
+        items = []
+    top_k = max(1, int(settings.fastgpt_top_k_default or 4))
+    items = items[:top_k]
+    contexts: list[str] = []
+    citations: list[Citation] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        answer = item.get("a") or ""
+        question_text = item.get("q") or ""
+        snippet = answer or question_text
+        if snippet:
+            contexts.append(snippet)
+        citations.append(
+            Citation(
+                title=item.get("sourceName"),
+                source=item.get("sourceId") or item.get("collectionId"),
+                snippet=snippet or None,
+                url=None,
+            )
+        )
+    return contexts, citations
+
+
 async def rag_retrieve(state: AgentState) -> AgentState:
     """RAG 主流程：检索 + 事件上报。"""
     question = state["question"]
     emit_event(state, "rag.start", {"question": question}, status="running", step_id="rag")
+    trace = get_current_trace()
+    span = start_span(trace, name="node.rag_retrieve", input_data={"question": question})
+    error_message: str | None = None
     try:
-        contexts, citations = await _ragflow_retrieve(question)
+        provider = (settings.rag_provider or "ragflow").lower()
+        logger.warning("rag provider=%s", provider)
+        if provider == "fastgpt":
+            contexts, citations = await _fastgpt_retrieve(question)
+        else:
+            contexts, citations = await _ragflow_retrieve(question)
         emit_event(
             state,
             "rag.hits",
@@ -102,6 +168,7 @@ async def rag_retrieve(state: AgentState) -> AgentState:
         )
     except Exception as exc:
         contexts, citations = [], []
+        error_message = str(exc)
         emit_event(
             state,
             "rag.error",
@@ -109,4 +176,9 @@ async def rag_retrieve(state: AgentState) -> AgentState:
             status="failed",
             step_id="rag",
         )
+    end_span(
+        span,
+        output={"context_count": len(contexts), "citation_count": len(citations)},
+        metadata={"error": error_message} if error_message else None,
+    )
     return {"policy_context": contexts, "citations": citations}

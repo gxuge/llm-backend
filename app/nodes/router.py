@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.core.langfuse import end_span, get_current_trace, start_span
 from app.nodes.state import AgentState
 from src.exam_agent.services.events import emit_event
 
@@ -7,6 +8,8 @@ from src.exam_agent.services.events import emit_event
 def route_tools(state: AgentState) -> AgentState:
     query = state.get("query")
     intent = query.intent if query else "政策"
+    trace = get_current_trace()
+    span = start_span(trace, name="node.route_tools", input_data={"intent": intent})
     need_tools = intent in {"分数", "排名", "推荐", "学校信息", "混合"}
     if need_tools and query and query.registered_residence_type is None:
         query.registered_residence_type = 2
@@ -19,4 +22,5 @@ def route_tools(state: AgentState) -> AgentState:
         {"intent": intent, "need_tools": need_tools},
         status="running",
     )
+    end_span(span, output={"need_tools": need_tools, "need_compute_rule": need_compute_rule})
     return {"need_tools": need_tools, "query": query, "need_compute_rule": need_compute_rule}

@@ -5,6 +5,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage
 
+from app.core.langfuse import end_span, get_current_trace, start_span
 from app.nodes.state import AgentState, MAX_TOOL_ROUNDS
 from app.nodes.utils import find_candidates
 from src.exam_agent.services.events import emit_event
@@ -17,11 +18,19 @@ def plan_tools(state: AgentState) -> AgentState:
     tool_data = state.get("tool_data", {})
     resolved_school_id = state.get("resolved_school_id")
     resolved_area_id = state.get("resolved_area_id")
+    trace = get_current_trace()
+    span = start_span(
+        trace,
+        name="node.plan_tools",
+        input_data={"tool_round": tool_round, "resolved_school_id": resolved_school_id, "resolved_area_id": resolved_area_id},
+    )
     if not query or not state.get("need_tools"):
         ai_message = AIMessage(content="无需工具调用。", tool_calls=[])
+        end_span(span, output={"tool_calls": 0, "skipped": True})
         return {"messages": [ai_message]}
     if tool_round >= MAX_TOOL_ROUNDS:
         ai_message = AIMessage(content="工具调用轮次已达上限。", tool_calls=[])
+        end_span(span, output={"tool_calls": 0, "skipped": True, "reason": "max_rounds"})
         return {"messages": [ai_message]}
 
     tool_calls: list[dict[str, Any]] = []
@@ -150,4 +159,5 @@ def plan_tools(state: AgentState) -> AgentState:
             group_id=tool_group_id,
         )
     ai_message = AIMessage(content="已准备工具调用。", tool_calls=tool_calls)
+    end_span(span, output={"tool_calls": len(tool_calls)})
     return {**updates, "messages": [ai_message]}

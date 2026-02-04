@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.core.langfuse import end_span, get_current_trace, start_span
 from app.nodes.state import AgentState
 from app.nodes.utils import build_table_from_rows, find_candidates
 from app.schemas.exam_agent import TableSpec
@@ -11,6 +12,8 @@ def viz_builder(state: AgentState) -> AgentState:
     query = state.get("query")
     tool_data = state.get("tool_data", {})
     computed = state.get("computed", {})
+    trace = get_current_trace()
+    span = start_span(trace, name="node.viz_builder", input_data={"has_tool_data": bool(tool_data)})
 
     table = TableSpec(table_id="empty", title="No data", row_key="id", columns=[], rows=[])
 
@@ -31,4 +34,5 @@ def viz_builder(state: AgentState) -> AgentState:
         table = build_table_from_rows(rows, "推荐结果", "recommendations")
 
     # 表格事件已移至 summary 结束后统一输出
+    end_span(span, output={"table_id": table.table_id})
     return {"table": table, "chart": None}

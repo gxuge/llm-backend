@@ -33,6 +33,8 @@ class AgentState(TypedDict, total=False):
     need_compute: bool
     final: dict[str, Any]
     access_token: str | None
+    enable_think: bool
+    show_think: bool
     writer: StreamWriter | None
     messages: Annotated[list[AnyMessage], add_messages]
 

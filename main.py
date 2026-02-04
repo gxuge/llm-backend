@@ -7,6 +7,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.routes import health, internal_runs, workflow
 from app.core.config import settings
+from app.services.run_store import RedisUnavailableError
 
 
 def create_app() -> FastAPI:
@@ -45,6 +46,13 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=422,
             content={"error": {"message": "Validation error", "details": exc.errors()}},
+        )
+
+    @app.exception_handler(RedisUnavailableError)
+    async def redis_unavailable_handler(request: Request, exc: RedisUnavailableError):
+        return JSONResponse(
+            status_code=503,
+            content={"error": {"message": "Redis unavailable", "code": "REDIS_UNAVAILABLE"}},
         )
 
     @app.exception_handler(Exception)

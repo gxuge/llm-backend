@@ -17,7 +17,7 @@ from app.agent.nodes import (
     tool_node,
     viz_builder,
 )
-from app.nodes.synth import rag_summary, tool_summary
+from app.nodes.llm_stream_node import rag_summary, tool_summary
 
 
 # Router 分支：是否进入工具链

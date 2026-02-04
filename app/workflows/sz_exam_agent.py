@@ -1,8 +1,6 @@
-# ??????????????????
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
-import json
 
 from langchain_core.messages import HumanMessage
 
@@ -23,13 +21,26 @@ async def run_agent(question: str, access_token: str | None = None) -> dict:
 
 
 # SSE 流式调用，输出 delta/data/chart/final 事件
-async def stream_agent(question: str, access_token: str | None = None) -> AsyncGenerator[str, None]:
+def _extract_enable_think(sampling: dict | None) -> bool:
+    if not sampling:
+        return False
+    return bool(sampling.get("enable_think") or sampling.get("enableThink"))
+
+
+async def stream_agent(
+    question: str,
+    access_token: str | None = None,
+    sampling: dict | None = None,
+) -> AsyncGenerator[str, None]:
     graph = get_exam_agent_graph()
+    enable_think = _extract_enable_think(sampling)
     initial_state = {
         "question": question,
         "messages": [HumanMessage(content=question)],
         "tool_round": 0,
         "access_token": access_token,
+        "enable_think": enable_think,
+        "show_think": enable_think,
     }
     async for chunk in graph.astream(initial_state, stream_mode="custom"):
         if isinstance(chunk, dict) and "event" in chunk:

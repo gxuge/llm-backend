@@ -7,6 +7,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, ToolMessage
 
+from app.core.langfuse import end_span, get_current_trace, start_span
 from app.nodes.state import AgentState
 from app.nodes.utils import merge_tool_data
 from app.tools import SCHOOL_TOOLS
@@ -28,6 +29,8 @@ async def tool_node(state: AgentState) -> AgentState:
     if not last_ai or not last_ai.tool_calls:
         return {}
 
+    trace = get_current_trace()
+    span = start_span(trace, name="node.tool_node", input_data={"tool_calls": len(last_ai.tool_calls)})
     results: list[ToolMessage] = []
     tool_data = state.get("tool_data", {})
     tool_errors = list(state.get("tool_errors", []))
@@ -109,4 +112,8 @@ async def tool_node(state: AgentState) -> AgentState:
         updates["computed"] = computed
     if token:
         set_access_token(None)
+    end_span(
+        span,
+        output={"tool_calls": len(last_ai.tool_calls), "tool_errors": len(tool_errors)},
+    )
     return updates

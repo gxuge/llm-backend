@@ -5,6 +5,7 @@ import json
 import re
 
 from app.core.config import settings
+from app.core.langfuse import end_span, get_current_trace, start_span
 from app.nodes.state import AgentState, INTENT_OPTIONS
 from app.nodes.utils import fallback_extract, normalize_query
 from app.prompts.exam_agent import extractor_system_prompt
@@ -14,10 +15,12 @@ from src.exam_agent.services.events import emit_event
 
 async def extract_query(state: AgentState) -> AgentState:
     question = state["question"]
-    emit_event(state, "run.start", {"question": question}, status="running")
     year = datetime.date.today().year
     system_prompt = extractor_system_prompt(INTENT_OPTIONS)
     user_prompt = f"当前年份：{year}\n问题：{question}"
+    trace = get_current_trace()
+    span = start_span(trace, name="node.extract", input_data={"question": question})
+    fallback_used = False
     try:
         result = await create_chat_completion(
             [
@@ -37,5 +40,13 @@ async def extract_query(state: AgentState) -> AgentState:
         query = normalize_query(payload)
     except Exception:
         query = fallback_extract(question)
+        fallback_used = True
         emit_event(state, "trace.event", {"message": "Extractor fallback used."}, status="running")
+    query_payload = None
+    if query is not None:
+        if hasattr(query, "model_dump"):
+            query_payload = query.model_dump()
+        else:
+            query_payload = getattr(query, "__dict__", None)
+    end_span(span, output={"query": query_payload}, metadata={"fallback": fallback_used})
     return {"query": query}
