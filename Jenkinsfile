@@ -1,9 +1,6 @@
 pipeline {
   agent any
 
-  environment {
-    COMPOSE_FILE = 'docker-compose.yml'
-  }
 
   stages {
     stage('Checkout') {
@@ -12,16 +9,30 @@ pipeline {
       }
     }
 
+    stage('Prepare Env') {
+      steps {
+        sh '''
+          if [ ! -f .env ]; then
+            if [ -f .env.example ]; then
+              cp .env.example .env
+            else
+              touch .env
+            fi
+          fi
+        '''
+      }
+    }
+
     stage('Build Image') {
       steps {
-        sh 'docker compose -f $COMPOSE_FILE build'
+        sh 'docker compose build'
       }
     }
 
     stage('Deploy') {
       steps {
         sh '''
-          docker compose -f $COMPOSE_FILE up -d --build
+          docker compose up -d
         '''
       }
     }
