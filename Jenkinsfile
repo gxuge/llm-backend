@@ -28,7 +28,8 @@ pipeline {
         sshagent(credentials: ['deploy-ssh']) {
           sh '''
             ssh -o StrictHostKeyChecking=no $DEPLOY_USER@$DEPLOY_HOST \
-              "cd $DEPLOY_PATH && \
+              "mkdir -p $DEPLOY_PATH && \
+               cd $DEPLOY_PATH && \
                export IMAGE_NAME=$IMAGE_NAME IMAGE_TAG=$IMAGE_TAG && \
                docker compose -f $COMPOSE_FILE pull && \
                docker compose -f $COMPOSE_FILE up -d"
