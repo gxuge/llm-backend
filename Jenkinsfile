@@ -6,7 +6,7 @@ pipeline {
     IMAGE_TAG  = "${env.GIT_COMMIT}"
     DEPLOY_HOST = '117.72.149.125'
     DEPLOY_USER = 'root'
-    DEPLOY_PATH = '/opt/fastapi-langgraph'
+    DEPLOY_PATH = '/www/fastapi-langgraph-jenkins'
     COMPOSE_FILE = 'docker-compose.yml'
   }
 
