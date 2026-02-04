@@ -29,9 +29,10 @@ pipeline {
           sh '''
             ssh -o StrictHostKeyChecking=no $DEPLOY_USER@$DEPLOY_HOST \
               "mkdir -p $DEPLOY_PATH"
-            scp -o StrictHostKeyChecking=no docker-compose.yml .env $DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/
+            scp -o StrictHostKeyChecking=no docker-compose.yml .env.example $DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/
             ssh -o StrictHostKeyChecking=no $DEPLOY_USER@$DEPLOY_HOST \
               "cd $DEPLOY_PATH && \
+               cp .env.example .env && \
                export IMAGE_NAME=$IMAGE_NAME IMAGE_TAG=$IMAGE_TAG && \
                docker compose -f $COMPOSE_FILE pull && \
                docker compose -f $COMPOSE_FILE up -d"
