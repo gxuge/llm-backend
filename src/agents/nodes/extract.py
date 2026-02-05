@@ -1,0 +1,52 @@
+from __future__ import annotations
+
+import datetime
+import json
+import re
+
+from src.app.core.config import settings
+from src.app.core.langfuse import end_span, get_current_trace, start_span
+from src.agents.nodes.state import AgentState, INTENT_OPTIONS
+from src.agents.nodes.utils import fallback_extract, normalize_query
+from src.app.prompts.exam_agent import extractor_system_prompt
+from src.app.services.modelscope import create_chat_completion
+from src.agents.services.events import emit_event
+
+
+async def extract_query(state: AgentState) -> AgentState:
+    question = state["question"]
+    year = datetime.date.today().year
+    system_prompt = extractor_system_prompt(INTENT_OPTIONS)
+    user_prompt = f"当前年份：{year}\n问题：{question}"
+    trace = get_current_trace()
+    span = start_span(trace, name="node.extract", input_data={"question": question})
+    fallback_used = False
+    try:
+        result = await create_chat_completion(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            model=settings.model_default,
+            temperature=0,
+            top_p=1,
+            stream=False,
+        )
+        payload_text = result["content"]
+        json_match = re.search(r"\{.*\}", payload_text, re.DOTALL)
+        if not json_match:
+            raise ValueError("Extractor did not return JSON.")
+        payload = json.loads(json_match.group(0))
+        query = normalize_query(payload)
+    except Exception:
+        query = fallback_extract(question)
+        fallback_used = True
+        emit_event(state, "trace.event", {"message": "Extractor fallback used."}, status="running")
+    query_payload = None
+    if query is not None:
+        if hasattr(query, "model_dump"):
+            query_payload = query.model_dump()
+        else:
+            query_payload = getattr(query, "__dict__", None)
+    end_span(span, output={"query": query_payload}, metadata={"fallback": fallback_used})
+    return {"query": query}

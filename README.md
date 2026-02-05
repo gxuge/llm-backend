@@ -6,11 +6,11 @@ Minimal FastAPI project pre-wired with a LangGraph demo and a RAGFlow + DeepSeek
 1. (Optional) `python -m venv .venv && .\.venv\Scripts\activate`
 2. Install deps: `pip install -r requirements.txt`
 3. Copy env template: `cp .env.example .env` (adjust values if needed)
-4. Run: `uvicorn main:app --reload --host 0.0.0.0 --port 8000`
+4. Run: `uvicorn src.main:app --reload --host 0.0.0.0 --port 8000`
 5. Open Swagger UI at `http://localhost:8000/docs`
 
 ## Project layout
-- `main.py` - FastAPI app factory, CORS, router wiring, Swagger config.
+- `src/main.py` - FastAPI app factory, CORS, router wiring, Swagger config.
 - `app/core/config.py` - Environment-driven settings via `pydantic-settings`.
 - `app/api/routes/` - API routers (`health`, `workflow`, `internal_runs`).
 - `app/workflows/langgraph_demo.py` - Small LangGraph demo graph.
