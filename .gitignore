@@ -20,7 +20,6 @@ venv/
 
 # Env files
 .env
-.env.*
 
 # Logs
 uvicorn.err.log
