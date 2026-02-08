@@ -12,12 +12,11 @@ pipeline {
     stage('Prepare Env') {
       steps {
         sh '''
-          if [ ! -f .env ]; then
-            if [ -f .env.example ]; then
-              cp .env.example .env
-            else
-              touch .env
-            fi
+          if [ -f .env.example ]; then
+            cp .env.example .env
+          else
+            echo ".env.example not found"
+            exit 1
           fi
         '''
       }
