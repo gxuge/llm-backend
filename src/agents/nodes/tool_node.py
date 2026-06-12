@@ -8,9 +8,8 @@ from typing import Any
 from langchain_core.messages import AIMessage, ToolMessage
 
 from src.app.core.langfuse import end_span, get_current_trace, start_span
-from src.agents.tools import SCHOOL_TOOLS
+from src.agents.tools import SCHOOL_TOOLS, set_access_token
 from src.agents.tools.exam_agent_tools import compute_recommendations
-from src.agents.tools.school_tools import set_access_token
 from src.agents.nodes.state import AgentState
 from src.agents.nodes.utils import merge_tool_data
 from src.agents.services.events import emit_event
@@ -44,7 +43,7 @@ async def tool_node(state: AgentState) -> AgentState:
         # 单工具调用封装，兼容 async/sync 工具
         tool = TOOL_MAP.get(call["name"])
         if not tool:
-            return call["name"], {"error": "Tool not found."}, call["id"]
+            return call["name"], {"error": "未找到对应工具。"}, call["id"]
         try:
             if hasattr(tool, "ainvoke"):
                 payload = await tool.ainvoke(call["args"])

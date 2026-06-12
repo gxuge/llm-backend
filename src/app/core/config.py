@@ -20,6 +20,12 @@ class Settings(BaseSettings):
     model_frequency_penalty_default: float = 0.0
     model_max_tokens_default: int | None = None
     model_stream_default: bool = False
+    tool_gate_model: str | None = None
+    tool_gate_temperature: float = 0.0
+    tool_gate_top_p: float = 1.0
+    # 工具门控模式：rule / llm / hybrid
+    # 工具门控模式：rule / llm / hybrid / tool_call
+    tool_planner_mode: str = "tool_call"
     rag_provider: str = "ragflow"
     ragflow_api_base: str = ""
     ragflow_api_key: str = ""

@@ -1,5 +1,11 @@
-# 工具包初始化
-from .school import (
+from __future__ import annotations
+
+from src.agents.tools.school.client import (
+    SchoolApiError,
+    SchoolConfigError,
+    set_access_token,
+)
+from src.agents.tools.school.registry import (
     SCHOOL_TOOLS,
     SCHOOL_TOOL_SCHEMAS,
     SCHOOL_TOOL_SPECS,
@@ -11,12 +17,13 @@ from .school import (
     list_school_scores,
     list_schools,
     list_score_layer,
-    set_access_token,
 )
-from .exam_agent_tools import compute_recommendations
 
-# 工具总导出：学校工具 + 计算工具。
+# 对外导出学校工具域的统一入口。
 __all__ = [
+    "SchoolConfigError",
+    "SchoolApiError",
+    "set_access_token",
     "SCHOOL_TOOLS",
     "SCHOOL_TOOL_SCHEMAS",
     "SCHOOL_TOOL_SPECS",
@@ -28,6 +35,4 @@ __all__ = [
     "list_score_layer",
     "list_school_ranks",
     "list_schools",
-    "set_access_token",
-    "compute_recommendations",
 ]

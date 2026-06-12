@@ -14,6 +14,10 @@ from src.app.prompts.exam_agent import (
 from src.app.services.modelscope import stream_chat_completion
 from src.app.services.run_store import _sse_event
 from src.agents.nodes.state import AgentState
+from src.agents.nodes.tool_summary_payload import (
+    build_tool_summary_payload,
+    build_tool_summary_prompt_payload,
+)
 from src.agents.nodes.utils import build_context_block
 from src.agents.services.events import emit_event
 
@@ -237,77 +241,30 @@ async def rag_summary(state: AgentState) -> AgentState:
     return {}
 
 
-def _sanitize_tool_data(tool_data: dict[str, Any], computed: dict[str, Any]) -> dict[str, Any]:
-    safe_payload: dict[str, Any] = {"tools": {}}
-    tool_whitelist: dict[str, set[str]] = {
-        "list_school_page": {
-            "id",
-            "schoolId",
-            "name",
-            "schoolName",
-            "areaId",
-            "areaName",
-            "schoolType",
-            "boardingType",
-        },
-        "list_area_page": {"id", "areaId", "name", "areaName"},
-        "list_school_scores": {
-            "id",
-            "schoolId",
-            "schoolName",
-            "year",
-            "type",
-            "score",
-            "scoreLine",
-            "minScore",
-            "registeredResidenceType",
-            "accommodationType",
-        },
-        "list_school_rank_page": {"id", "schoolId", "schoolName", "year", "rank", "minRank"},
-        "list_score_layer_page": {"id", "year", "subject", "score", "count"},
-        "list_school_ranks": {"id", "schoolId", "schoolName", "year", "rank", "minRank"},
-        "list_schools": {
-            "id",
-            "schoolId",
-            "name",
-            "schoolName",
-            "areaId",
-            "areaName",
-            "schoolType",
-            "boardingType",
-        },
-    }
-    default_whitelist = {"id", "name", "schoolName", "year", "score", "rank"}
-
-    for tool_name, payloads in (tool_data or {}).items():
-        preview: list[Any] = []
-        whitelist = tool_whitelist.get(tool_name, default_whitelist)
-        for payload in payloads[:2]:
-            if isinstance(payload, dict):
-                preview.append({k: payload.get(k) for k in whitelist if k in payload})
-        safe_payload["tools"][tool_name] = {
-            "count": len(payloads),
-            "preview": preview,
-        }
-    if computed:
-        safe_payload["computed"] = computed
-    return safe_payload
-
-
 async def tool_summary(state: AgentState) -> AgentState:
     """工具结果摘要（不暴露隐私字段）。"""
     tool_data = state.get("tool_data", {})
     computed = state.get("computed", {})
-    if not tool_data and not computed:
+    tool_errors = state.get("tool_errors", [])
+    if not tool_data and not computed and not tool_errors and not state.get("tool_started"):
         return {}
     trace = get_current_trace()
     span = start_span(trace, name="node.tool_summary", input_data={"tool_count": len(tool_data)})
     group_id = state.get("tool_group_id")
     emit_event(state, "tool.summary.start", {"stage": "tools"}, status="running", step_id="tool.summary", group_id=group_id)
-    safe_payload = _sanitize_tool_data(tool_data, computed)
+
+    full_payload = build_tool_summary_payload(tool_data, computed, tool_errors)
+    prompt_payload = build_tool_summary_prompt_payload(full_payload)
+    query = state.get("query")
+    llm_payload = {
+        "question": state.get("question", ""),
+        "intent": query.intent if query else None,
+        **prompt_payload,
+    }
+
     prompt = [
         {"role": "system", "content": tool_summary_system_prompt()},
-        {"role": "user", "content": json.dumps(safe_payload, ensure_ascii=False)},
+        {"role": "user", "content": json.dumps(llm_payload, ensure_ascii=False)},
     ]
     enable_think = _extract_enable_think(state)
     show_think = False

@@ -25,6 +25,8 @@ async def create_chat_completion(
     presence_penalty: float | None = None,
     frequency_penalty: float | None = None,
     max_tokens: int | None = None,
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: str | dict[str, Any] | None = None,
     stream: bool = False,
 ) -> dict[str, Any]:
     """
@@ -48,13 +50,17 @@ async def create_chat_completion(
     for key, value in optional_fields.items():
         if value is not None:
             payload[key] = value
+    if tools:
+        payload["tools"] = tools
+    if tool_choice is not None:
+        payload["tool_choice"] = tool_choice
 
     trace = get_current_trace()
     generation = start_generation(
         trace,
         name="modelscope.chat",
         model=model,
-        input_data={"messages": messages, "stream": stream},
+        input_data={"messages": messages, "stream": stream, "has_tools": bool(tools)},
     )
 
     async with httpx.AsyncClient(timeout=60) as client:
@@ -74,16 +80,23 @@ async def create_chat_completion(
     first_choice = choices[0] if choices else {}
     message_block = first_choice.get("message") or {}
     content = message_block.get("content", "")
+    tool_calls = message_block.get("tool_calls") or []
     reasoning = (
         message_block.get("reasoning_content")
         or first_choice.get("reasoning")
         or data.get("reasoning_content")
     )
 
-    if not content:
-        raise ModelscopeChatError("ModelScope response missing `message.content`.")
+    if not content and not tool_calls:
+        raise ModelscopeChatError("ModelScope response missing both `message.content` and `message.tool_calls`.")
 
-    result = {"content": content, "reasoning": reasoning, "model": model, "raw": data}
+    result = {
+        "content": content,
+        "reasoning": reasoning,
+        "tool_calls": tool_calls,
+        "model": model,
+        "raw": data,
+    }
     end_generation(generation, output=result)
     return result
 

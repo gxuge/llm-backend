@@ -9,6 +9,9 @@ from src.app.core.langfuse import end_span, get_current_trace, start_span
 from src.agents.nodes.state import AgentState, MAX_TOOL_ROUNDS
 from src.agents.nodes.utils import find_candidates
 from src.agents.services.events import emit_event
+from src.agents.tools import SCHOOL_TOOLS
+
+ALLOWED_TOOL_NAMES = {tool.name for tool in SCHOOL_TOOLS}
 
 
 def plan_tools(state: AgentState) -> AgentState:
@@ -35,28 +38,73 @@ def plan_tools(state: AgentState) -> AgentState:
 
     tool_calls: list[dict[str, Any]] = []
     updates: dict[str, Any] = {"tool_round": tool_round}
+    suggested_tool_calls = state.get("suggested_tool_calls") or []
+    if suggested_tool_calls:
+        # 优先使用 router 的 LLM tool_call 候选，但仅允许 school tools。
+        for idx, call in enumerate(suggested_tool_calls):
+            if not isinstance(call, dict):
+                continue
+            name = call.get("name")
+            if name not in ALLOWED_TOOL_NAMES:
+                continue
+            raw_args = call.get("args")
+            args = raw_args if isinstance(raw_args, dict) else {}
+            call_id = call.get("id")
+            if not isinstance(call_id, str) or not call_id:
+                call_id = f"call_{name}_{tool_round}_{idx}"
+            tool_calls.append({"id": call_id, "name": name, "args": args})
+        if tool_calls:
+            updates["tool_round"] = tool_round + 1
+            updates["suggested_tool_calls"] = []
+            tool_group_id = state.get("tool_group_id") or uuid.uuid4().hex
+            updates["tool_group_id"] = tool_group_id
+            if not state.get("tool_started"):
+                emit_event(
+                    state,
+                    "tool.start",
+                    {"group_id": tool_group_id},
+                    status="running",
+                    group_id=tool_group_id,
+                )
+                updates["tool_started"] = True
+            for call in tool_calls:
+                emit_event(
+                    state,
+                    "tool.call",
+                    {
+                        "toolCallId": call["id"],
+                        "apiName": call["name"],
+                        "arguments": call["args"],
+                    },
+                    status="queued",
+                    step_id=call["id"],
+                    group_id=tool_group_id,
+                )
+            ai_message = AIMessage(content="已准备工具调用", tool_calls=tool_calls)
+            end_span(span, output={"tool_calls": len(tool_calls), "source": "llm_tool_call"})
+            return {**updates, "messages": [ai_message]}
 
     if query.area_name and not resolved_area_id:
-        if not tool_data.get("list_area_page"):
+        if not tool_data.get("list_area"):
             tool_calls.append(
                 {
-                    "id": f"call_list_area_page_{tool_round}",
-                    "name": "list_area_page",
-                    "args": {"name": query.area_name, "page_no": 1, "page_size": 5},
+                    "id": f"call_list_area_{tool_round}",
+                    "name": "list_area",
+                    "args": {"name": query.area_name},
                 }
             )
         else:
-            candidates = find_candidates(tool_data, "list_area_page")
+            candidates = find_candidates(tool_data, "list_area")
             if len(candidates) == 1:
                 resolved_area_id = candidates[0].get("id") or candidates[0].get("areaId")
                 updates["resolved_area_id"] = resolved_area_id
 
     if query.school_name and not resolved_school_id:
-        if not tool_data.get("list_schools"):
+        if not tool_data.get("list_school"):
             tool_calls.append(
                 {
-                    "id": f"call_list_schools_{tool_round}",
-                    "name": "list_schools",
+                    "id": f"call_list_school_{tool_round}",
+                    "name": "list_school",
                     "args": {
                         "name": query.school_name,
                         "area_id": resolved_area_id,
@@ -66,7 +114,7 @@ def plan_tools(state: AgentState) -> AgentState:
                 }
             )
         else:
-            candidates = find_candidates(tool_data, "list_schools")
+            candidates = find_candidates(tool_data, "list_school")
             if len(candidates) == 1:
                 resolved_school_id = candidates[0].get("id") or candidates[0].get("schoolId")
                 updates["resolved_school_id"] = resolved_school_id
@@ -122,8 +170,8 @@ def plan_tools(state: AgentState) -> AgentState:
         elif query.intent == "学校信息":
             tool_calls.append(
                 {
-                    "id": f"call_list_schools_{tool_round}",
-                    "name": "list_schools",
+                    "id": f"call_list_school_{tool_round}",
+                    "name": "list_school",
                     "args": {
                         "name": query.school_name,
                         "area_id": resolved_area_id,

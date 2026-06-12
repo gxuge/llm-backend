@@ -19,6 +19,13 @@ class AgentState(TypedDict, total=False):
     policy_context: list[str]
     citations: list[Citation]
     need_tools: bool
+    # 规则门控结果：是否需要进入工具分支。
+    need_tools_rule: bool
+    # LLM 门控结果：True/False；未调用或失败时为 None。
+    need_tools_llm: bool | None
+    # 原生 tool_call 门控结果：True/False；未调用或失败时为 None。
+    need_tools_tool_call: bool | None
+    suggested_tool_calls: list[dict[str, Any]]
     tool_round: int
     tool_group_id: str | None
     tool_data: dict[str, list[Any]]
